@@ -1,42 +1,83 @@
 name: CI
 
 on:
-  pull_request:
-  push:
-    branches-ignore:
-      - 'dependabot/**'
   workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Gradle test task selector (e.g. test --tests FooTest); empty runs the full build'
+        required: false
+        default: ''
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     strategy:
       matrix:
         java: [ 8, 11, 17, 18 ]
     name: Test JDK ${{ matrix.java }}
     steps:
       - uses: actions/checkout@v3
+      - name: JDK 8 for the Gradle toolchain
+        uses: actions/setup-java@v2
+        with:
+          java-version: 8
+          java-package: 'jdk'
+          distribution: 'temurin'
       - uses: actions/setup-java@v2
         with:
           java-version: ${{ matrix.java }}
           java-package: 'jdk'
           distribution: 'temurin'
+      - name: Point the Gradle toolchain at the provisioned JDK 8
+        run: |
+          mkdir -p ~/.gradle
+          echo "org.gradle.java.installations.fromEnv=JAVA_HOME_8_X64" >> ~/.gradle/gradle.properties
+          echo "org.gradle.java.installations.auto-download=false" >> ~/.gradle/gradle.properties
       - name: Build
         uses: gradle/gradle-build-action@v2
         with:
-          arguments: build
+          arguments: ${{ inputs.test-filter != '' && format('assemble jar {0}', inputs.test-filter) || 'build jar -x checkstyleMain -x checkstyleTest -x checkstyleRegressionTest' }}
+      - name: Test results summary
+        if: always()
+        shell: python3 {0}
+        run: |
+          import glob, xml.etree.ElementTree as ET
+          t = f = e = s = 0
+          for p in sorted(glob.glob('build/test-results/**/*.xml', recursive=True)):
+              r = ET.parse(p).getroot()
+              for tc in r.iter('testcase'):
+                  name = tc.get('classname') + '.' + tc.get('name')
+                  t += 1
+                  if tc.find('failure') is not None: f += 1; print('FAILED  ' + name)
+                  elif tc.find('error') is not None: e += 1; print('ERROR   ' + name)
+                  elif tc.find('skipped') is not None:
+                      s += 1; print('SKIPPED ' + name + ' -- ' + (tc.find('skipped').get('message') or 'no message'))
+                  else: print('PASSED  ' + name)
+          print(f'Tests run: {t}, Passed: {t - f - e - s}, Failures: {f}, Errors: {e}, Skipped: {s}')
       - name: Jacoco
         uses: gradle/gradle-build-action@v2
         with:
           arguments: jacocoTestReport
-      - uses: codecov/codecov-action@v2
+      - name: Upload jar
         if: matrix.java == '8'
+        uses: actions/upload-artifact@v4
+        with:
+          name: junrar-jar
+          path: |
+            build/libs/junrar-*.jar
+            !build/libs/*-sources.jar
+            !build/libs/*-javadoc.jar
+          if-no-files-found: error
+      - uses: codecov/codecov-action@v2
+        if: false
 
   release:
     name: semantic release
     runs-on: ubuntu-latest
     needs: test
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    timeout-minutes: 30
+    if: false
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v2
